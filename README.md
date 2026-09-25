@@ -43,7 +43,7 @@ The Earth's surface is tessellated into **Uber H3 hexagonal cells** at **resolut
 When a player traverses an H3 cell, score accumulates according to:
 
 $$
-\text{score} += \text{visit\_weight}(\text{activity\_type}) \times \text{recency\_decay}(\Delta t)
+\text{score} += \text{visit weight}(\text{activity}) \times \text{recency decay}(\Delta t)
 $$
 
 | Activity Type | Multiplier Weight | Description |
@@ -56,7 +56,7 @@ $$
 Defensive scores decay organically over time, encouraging regular active defense:
 
 $$
-\text{recency\_decay}(\Delta t) = 2^{-\frac{\Delta t}{t_{1/2}}}
+\text{recency decay}(\Delta t) = 2^{-\frac{\Delta t}{t_{1/2}}}
 $$
 
 - **Half-life ($t_{1/2}$):** 14 days (1,209,600 seconds)
@@ -69,7 +69,7 @@ $$
 To eliminate rapid flickering caused by GPS jitter or parallel runners, a challenger must definitively exceed the defending owner's score by **15%**:
 
 $$
-\text{Score}_{\text{challenger}} > 1.15 \times \text{Score}_{\text{current\_owner}}
+\text{Score}_{\text{challenger}} > 1.15 \times \text{Score}_{\text{current owner}}
 $$
 
 > **Takeover Rule:** A challenger only captures defending territory if their accumulated score strictly exceeds **115%** of the current owner's active score (`Score_challenger > 1.15 * Score_current_owner`).
