@@ -36,35 +36,43 @@ The game engine implements mathematical territorial mechanics:
 
 ### 1. Spatial Tiling
 The Earth's surface is tessellated into **Uber H3 hexagonal cells** at **resolution 9**:
-- **Edge length:** $\approx 174\text{ meters}$
-- **Cell area:** $\approx 0.1\text{ km}^2$ ($109,400\text{ m}^2$)
+- **Edge length:** ≈ 174 meters
+- **Cell area:** ≈ 0.1 km² (109,400 m²)
 
 ### 2. Scoring Formula
 When a player traverses an H3 cell, score accumulates according to:
 
-$$\text{score} += \text{visit\_weight}(\text{activity\_type}) \times \text{recency\_decay}(\Delta t)$$
+$$
+\text{score} += \text{visit\_weight}(\text{activity\_type}) \times \text{recency\_decay}(\Delta t)
+$$
 
 | Activity Type | Multiplier Weight | Description |
 |---|---|---|
-| **Walk** | `1.0x` | Standard pedestrian pace ($\le 6\text{ km/h}$) |
-| **Jog** | `1.3x` | Moderate aerobic pace ($\approx 7 - 10\text{ km/h}$) |
-| **Run** | `1.6x` | High aerobic exertion ($\approx 10 - 25\text{ km/h}$) |
+| **Walk** | `1.0x` | Standard pedestrian pace (≤ 6 km/h) |
+| **Jog** | `1.3x` | Moderate aerobic pace (≈ 7 – 10 km/h) |
+| **Run** | `1.6x` | High aerobic exertion (≈ 10 – 25 km/h) |
 
 ### 3. Exponential Recency Decay (14-Day Half-Life)
 Defensive scores decay organically over time, encouraging regular active defense:
 
-$$\text{recency\_decay}(\Delta t) = 2^{-\frac{\Delta t}{t_{1/2}}}$$
+$$
+\text{recency\_decay}(\Delta t) = 2^{-\frac{\Delta t}{t_{1/2}}}
+$$
 
-- **Half-life ($t_{1/2}$):** $14\text{ days}$ ($1,209,600\text{ seconds}$)
-- **At Day 0:** Factor $= 1.000$
-- **At Day 7:** Factor $\approx 0.7071$
-- **At Day 14:** Factor $= 0.5000$ (decayed by 50%)
-- **At Day 28:** Factor $= 0.2500$
+- **Half-life ($t_{1/2}$):** 14 days (1,209,600 seconds)
+- **At Day 0:** Factor = 1.000
+- **At Day 7:** Factor ≈ 0.7071
+- **At Day 14:** Factor = 0.5000 (decayed by 50%)
+- **At Day 28:** Factor = 0.2500
 
 ### 4. 15% Ownership Hysteresis Buffer
 To eliminate rapid flickering caused by GPS jitter or parallel runners, a challenger must definitively exceed the defending owner's score by **15%**:
 
-$$\text{Takeover Rule}: \text{Score}_{\text{challenger}} > 1.15 \times \text{Score}_{\text{current\_owner}}$$
+$$
+\text{Score}_{\text{challenger}} > 1.15 \times \text{Score}_{\text{current\_owner}}
+$$
+
+> **Takeover Rule:** A challenger only captures defending territory if their accumulated score strictly exceeds **115%** of the current owner's active score (`Score_challenger > 1.15 * Score_current_owner`).
 
 ### 5. Real-Time Displacement Alerts
 When an ownership flip occurs:
@@ -77,7 +85,7 @@ When an ownership flip occurs:
 
 All game scores are computed exclusively **server-side** from raw GPS telemetry pings:
 
-- 🚫 **Speed Ceiling**: GPS segments implying sustained pedestrian speeds $> 25.0\text{ km/h}$ are rejected to prevent driving or cycling spoofing.
+- 🚫 **Speed Ceiling**: GPS segments implying sustained pedestrian speeds > 25.0 km/h are rejected to prevent driving or cycling spoofing.
 - 🚫 **Teleportation Defense**: Consecutive route pings must pass continuously through adjacent neighboring H3 cells (`grid_distance <= 1`). Discontinuous teleport jumps are rejected.
 - 🚫 **Timestamp Monotonicity**: Rejects chronologically disordered or time-warped coordinates.
 
@@ -278,7 +286,7 @@ docker compose up --build
 | **1. Auth Screen** | Clean dark login/register interface with custom callsign and interactive 8-color conquest banner picker. |
 | **2. Live Map** | Interactive OSM tiles displaying owned H3 hexagon polygons painted in live player colors, player GPS indicator, and active route polyline. |
 | **3. Active Session HUD** | Real-time tracking panel displaying elapsed duration (`mm:ss`), distance in meters, cells conquered, pace rate multiplier, and finish button. Includes a built-in synthetic pedestrian movement simulator for seamless desktop/web testing. |
-| **4. Sector Leaderboards** | Ranked standings across **Local**, **City**, **Country**, and **Global** scopes with gold/silver/bronze podium badges and area metrics in $km^2$ and $m^2$. |
+| **4. Sector Leaderboards** | Ranked standings across **Local**, **City**, **Country**, and **Global** scopes with gold/silver/bronze podium badges and area metrics in km² and m². |
 | **5. Intel & Alerts** | Real-time displaced notification feed alerting players when their territory is captured by a challenger. |
 | **6. Commander Profile** | Profile card, total territory conquest statistics, war coins, and dynamic banner color customizer. |
 
