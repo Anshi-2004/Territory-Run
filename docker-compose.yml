@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: territory_run_db
+    restart: always
+    environment:
+      POSTGRES_DB: territory_run
+      POSTGRES_USER: territory_user
+      POSTGRES_PASSWORD: territory_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U territory_user -d territory_run"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: territory_run_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: territory_run_api
+    restart: always
+    environment:
+      DATABASE_URL: postgresql+asyncpg://territory_user:territory_password@db:5432/territory_run
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: territory_run_jwt_secret_dev_key_change_in_prod
+      H3_RESOLUTION: 9
+      RECENCY_HALF_LIFE_DAYS: 14.0
+      HYSTERESIS_FACTOR: 1.15
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
