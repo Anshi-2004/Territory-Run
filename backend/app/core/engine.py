@@ -11,6 +11,7 @@ from app.core.territory_math import (
     evaluate_ownership_flip,
     h3_to_postgis_wkt,
     h3_to_geojson_geometry,
+    latlng_to_h3,
 )
 from app.core.anti_cheat import AntiCheatValidator, AntiCheatError
 
@@ -68,6 +69,7 @@ class TerritorySimulationEngine:
         activity_type: str,
         pings: List[Dict[str, Any]],
         current_time: Optional[datetime] = None,
+        allow_direct_flips: bool = True,
     ) -> Dict[str, Any]:
         """
         Executes Section 6 Territory Recalculation Flow:
@@ -151,7 +153,8 @@ class TerritorySimulationEngine:
                 hysteresis_factor=self.hysteresis_factor,
             )
 
-            if flipped:
+            # Territory capture requires completing a closed circle unless direct flips are requested
+            if allow_direct_flips and flipped:
                 displaced_player_id = curr_owner_id
                 cell_area = self.get_cell_area_m2(cell)
 
@@ -202,6 +205,126 @@ class TerritorySimulationEngine:
         return {
             "touched_cells_count": len(touched_cells),
             "touched_cells": list(touched_cells),
+            "ownership_changes": ownership_changes,
+        }
+
+    def process_closed_loop(
+        self,
+        player_id: str,
+        activity_type: str,
+        loop_points: List[Dict[str, Any]],
+        current_time: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes Loop Enclosure Conquest:
+        When a runner completes a circle/loop:
+          1. Form a closed boundary polygon from GPS coordinates.
+          2. Compute all perimeter cells along the loop boundary.
+          3. Polyfill all interior H3 hexagon cells inside the enclosed area.
+          4. Capture and flip ownership of ALL cells inside the circle for the runner!
+        """
+        if current_time is None:
+            current_time = datetime.now(timezone.utc)
+        elif current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+
+        coords = [(float(p["lat"]), float(p["lng"])) for p in loop_points]
+        if len(coords) < 3:
+            return {"enclosed_cells_count": 0, "enclosed_area_m2": 0.0, "ownership_changes": []}
+
+        # Close polygon if not closed
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
+
+        weight = get_activity_weight(activity_type)
+        perimeter_cells: Set[str] = set()
+
+        # Continuous edge sampling
+        for i in range(len(coords) - 1):
+            p1 = coords[i]
+            p2 = coords[i + 1]
+            perimeter_cells.add(latlng_to_h3(p1[0], p1[1], self.h3_resolution))
+            perimeter_cells.add(latlng_to_h3(p2[0], p2[1], self.h3_resolution))
+            # Midpoint sampling
+            mid_lat = (p1[0] + p2[0]) / 2.0
+            mid_lng = (p1[1] + p2[1]) / 2.0
+            perimeter_cells.add(latlng_to_h3(mid_lat, mid_lng, self.h3_resolution))
+
+        # Enclosed interior cells via H3 LatLngPoly
+        interior_cells: Set[str] = set()
+        try:
+            poly = h3.LatLngPoly(coords)
+            interior_cells = set(h3.polygon_to_cells(poly, res=self.h3_resolution))
+        except Exception:
+            interior_cells = set()
+
+        all_enclosed_cells = perimeter_cells | interior_cells
+        ownership_changes: List[Dict[str, Any]] = []
+        total_captured_area = 0.0
+
+        for cell in all_enclosed_cells:
+            cell_record = self.territory_cells.get(cell, {
+                "h3_index": cell,
+                "owner_id": None,
+                "owner_score": 0.0,
+                "last_claimed_at": None,
+                "geom_wkt": h3_to_postgis_wkt(cell),
+            })
+
+            curr_owner_id = cell_record["owner_id"]
+            cell_area = self.get_cell_area_m2(cell)
+            total_captured_area += cell_area
+
+            # Award significant loop conquest score
+            loop_score = 12.0 * weight
+            if cell not in self.cell_contests:
+                self.cell_contests[cell] = {}
+            if player_id not in self.cell_contests[cell]:
+                self.cell_contests[cell][player_id] = {"score": 0.0, "last_activity_at": current_time}
+
+            self.cell_contests[cell][player_id]["score"] += loop_score
+            self.cell_contests[cell][player_id]["last_activity_at"] = current_time
+
+            # Flip cell ownership to the loop conqueror
+            cell_record["owner_id"] = player_id
+            cell_record["owner_score"] = self.cell_contests[cell][player_id]["score"]
+            cell_record["last_claimed_at"] = current_time
+            self.territory_cells[cell] = cell_record
+
+            # Update total player territory area
+            if curr_owner_id != player_id:
+                if player_id in self.players:
+                    self.players[player_id]["total_territory_area"] += cell_area
+                if curr_owner_id and curr_owner_id in self.players:
+                    self.players[curr_owner_id]["total_territory_area"] = max(
+                        0.0, self.players[curr_owner_id]["total_territory_area"] - cell_area
+                    )
+
+                change_event = {
+                    "h3_index": cell,
+                    "new_owner_id": player_id,
+                    "previous_owner_id": curr_owner_id,
+                    "score": cell_record["owner_score"],
+                    "timestamp": current_time.isoformat(),
+                    "geojson": h3_to_geojson_geometry(cell),
+                }
+                ownership_changes.append(change_event)
+                self.event_stream.append(change_event)
+
+                if curr_owner_id and curr_owner_id != player_id:
+                    notif = {
+                        "recipient_id": curr_owner_id,
+                        "title": "Territory Enclosed!",
+                        "message": f"Your territory at cell {cell[:8]}... was encircled and captured by {self.players.get(player_id, {}).get('username', 'another player')}!",
+                        "h3_index": cell,
+                        "displaced_by": player_id,
+                        "timestamp": current_time.isoformat(),
+                    }
+                    self.notification_queue.append(notif)
+
+        return {
+            "enclosed_cells_count": len(all_enclosed_cells),
+            "enclosed_area_m2": total_captured_area,
             "ownership_changes": ownership_changes,
         }
 

@@ -27,7 +27,7 @@ class GameProvider with ChangeNotifier {
   TerritoryCellModel? _inspectedCell;
   TerritoryCellModel? get inspectedCell => _inspectedCell;
 
-  // Active Tracking Session State
+  // Active Tracking Session & Circle Loop State
   bool _isTracking = false;
   String? _activeRouteId;
   String _activityType = "walk"; // walk | jog | run
@@ -36,12 +36,18 @@ class GameProvider with ChangeNotifier {
   double _sessionDistanceM = 0.0;
   int _sessionCapturedCount = 0;
   final List<LatLng> _sessionPath = [];
+  LatLng? _loopStartPoint;
   Timer? _sessionTimer;
   StreamSubscription? _locationSub;
+
+  // Circle Completion Celebration Result
+  Map<String, dynamic>? _lastCircleCelebration;
+  Map<String, dynamic>? get lastCircleCelebration => _lastCircleCelebration;
 
   bool get isTracking => _isTracking;
   String? get activeRouteId => _activeRouteId;
   String get activityType => _activityType;
+  LatLng? get loopStartPoint => _loopStartPoint;
 
   int get elapsedSeconds {
     if (!_isTracking || _sessionStartTime == null) return _elapsedSeconds;
@@ -54,6 +60,18 @@ class GameProvider with ChangeNotifier {
   LatLng get currentLocation => locationService.currentLocation;
   double get currentSpeedKmh => locationService.currentSpeedKmh;
   double get currentHeading => locationService.currentHeading;
+
+  /// Distance from current position back to the circle loop start
+  double get distanceToLoopStart {
+    if (_loopStartPoint == null || _sessionPath.isEmpty) return double.infinity;
+    return const Distance().as(LengthUnit.Meter, _sessionPath.last, _loopStartPoint!);
+  }
+
+  /// Runner has formed a path long enough (>= 80m and >= 6 points) to qualify for circle closure
+  bool get canCloseLoop => _isTracking && _sessionPath.length >= 6 && _sessionDistanceM >= 80.0;
+
+  /// Runner is approaching the start point (within 55m) and ready to close the circle
+  bool get isNearLoopStart => canCloseLoop && distanceToLoopStart <= 55.0;
 
   String get currentPaceString {
     final secs = elapsedSeconds;
@@ -126,23 +144,34 @@ class GameProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// Acquires actual GPS lock on device and centers viewport accordingly
+  void clearCircleCelebration() {
+    _lastCircleCelebration = null;
+    notifyListeners();
+  }
+
+  /// Sets map position to a specific location (e.g., from search or GPS)
+  void jumpToLocation(LatLng loc) {
+    locationService.setLocation(loc);
+    updateViewportBbox(
+      loc.longitude - 0.04,
+      loc.latitude - 0.04,
+      loc.longitude + 0.04,
+      loc.latitude + 0.04,
+    );
+    fetchViewportCells(
+      minLng: loc.longitude - 0.04,
+      minLat: loc.latitude - 0.04,
+      maxLng: loc.longitude + 0.04,
+      maxLat: loc.latitude + 0.04,
+    );
+    notifyListeners();
+  }
+
+  /// Acquires real GPS or IP location to show user's actual local neighborhood
   Future<LatLng?> initUserLocation() async {
     final loc = await locationService.initDeviceLocation();
     if (loc != null) {
-      updateViewportBbox(
-        loc.longitude - 0.04,
-        loc.latitude - 0.04,
-        loc.longitude + 0.04,
-        loc.latitude + 0.04,
-      );
-      fetchViewportCells(
-        minLng: loc.longitude - 0.04,
-        minLat: loc.latitude - 0.04,
-        maxLng: loc.longitude + 0.04,
-        maxLat: loc.latitude + 0.04,
-      );
-      notifyListeners();
+      jumpToLocation(loc);
     }
     return loc;
   }
@@ -189,7 +218,7 @@ class GameProvider with ChangeNotifier {
     );
   }
 
-  // --- Tracking Session Control ---
+  // --- Tracking Session & Circle Enclosure Control ---
 
   Future<bool> startTrackingSession({
     String activityType = "walk",
@@ -210,15 +239,16 @@ class GameProvider with ChangeNotifier {
       _sessionCapturedCount = 0;
       _sessionPath.clear();
       _sessionPath.add(locationService.currentLocation);
+      _loopStartPoint = locationService.currentLocation;
 
-      // Start periodic ticker for smooth UI updates
+      // Start periodic ticker
       _sessionTimer?.cancel();
       _sessionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
         _elapsedSeconds = DateTime.now().difference(_sessionStartTime!).inSeconds;
         notifyListeners();
       });
 
-      // Buffer pings to send to server in batches
+      // Buffer pings to record path telemetry on server
       final List<Map<String, dynamic>> pingBuffer = [];
 
       _locationSub?.cancel();
@@ -234,50 +264,36 @@ class GameProvider with ChangeNotifier {
         pingBuffer.add(ping.toJson());
         notifyListeners();
 
-        // Flush batch when buffer has 2+ pings
+        // Auto-close circle if runner physically returns to start point!
+        if (canCloseLoop && distanceToLoopStart <= 35.0) {
+          closeCurrentLoop();
+        }
+
+        // Flush batch pings every 2 points
         if (pingBuffer.length >= 2 && _activeRouteId != null) {
           final toSend = List<Map<String, dynamic>>.from(pingBuffer);
           pingBuffer.clear();
           try {
-            final res = await apiService.sendPings(_activeRouteId!, toSend);
-            final deltas = res['claimed_or_conquered_cells'] as List?;
-            if (deltas != null && deltas.isNotEmpty) {
-              _sessionCapturedCount += deltas.length;
-              for (final delta in deltas) {
-                final cell = TerritoryCellModel(
-                  h3Index: delta['h3_index'] ?? '',
-                  ownerId: delta['new_owner_id'],
-                  ownerColorHex: delta['color_hex'],
-                  ownerScore: (delta['score'] as num?)?.toDouble() ?? 0.0,
-                  lastClaimedAt: DateTime.now(),
-                  polygonPoints: TerritoryCellModel.fromJson(delta).polygonPoints,
-                );
-                _cellsMap[cell.h3Index] = cell;
-              }
-            }
+            await apiService.sendPings(_activeRouteId!, toSend);
           } catch (_) {}
-          notifyListeners();
         }
       });
 
-      // Start hardware GPS or simulation based on mode
+      // Start GPS or circular simulation based on mode
       if (effectiveMode == TrackingMode.realGps) {
         final started = await locationService.startRealGpsTracking();
         if (!started) {
-          // Fallback to simulation if GPS permission was denied
-          final speedKmh = activityType == "run" ? 11.5 : (activityType == "jog" ? 8.5 : 5.0);
           locationService.startSimulation(
-            speedKmh: speedKmh,
-            headingDegrees: 45.0,
+            speedKmh: activityType == "run" ? 11.5 : (activityType == "jog" ? 8.5 : 5.0),
             startFrom: locationService.currentLocation,
+            simulateLoop: true,
           );
         }
       } else {
-        final speedKmh = activityType == "run" ? 11.5 : (activityType == "jog" ? 8.5 : 5.0);
         locationService.startSimulation(
-          speedKmh: speedKmh,
-          headingDegrees: 45.0,
+          speedKmh: activityType == "run" ? 11.5 : (activityType == "jog" ? 8.5 : 5.0),
           startFrom: locationService.currentLocation,
+          simulateLoop: true,
         );
       }
 
@@ -285,6 +301,56 @@ class GameProvider with ChangeNotifier {
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// Closes the current running circle, captures all enclosed territory hexagons, and starts the next loop!
+  Future<Map<String, dynamic>?> closeCurrentLoop() async {
+    if (_activeRouteId == null || _sessionPath.length < 4) return null;
+
+    try {
+      final loopPoints = _sessionPath.map((p) {
+        return {
+          "lat": p.latitude,
+          "lng": p.longitude,
+          "timestamp": DateTime.now().toUtc().isoformat(),
+        };
+      }).toList();
+
+      final res = await apiService.closeLoop(
+        routeId: _activeRouteId!,
+        loopPoints: loopPoints,
+        activityType: _activityType,
+      );
+
+      final capturedCells = res['captured_cells'] as List?;
+      if (capturedCells != null && capturedCells.isNotEmpty) {
+        _sessionCapturedCount += capturedCells.length;
+        for (final delta in capturedCells) {
+          final cell = TerritoryCellModel(
+            h3Index: delta['h3_index'] ?? '',
+            ownerId: delta['new_owner_id'],
+            ownerColorHex: delta['color_hex'],
+            ownerScore: (delta['score'] as num?)?.toDouble() ?? 0.0,
+            lastClaimedAt: DateTime.now(),
+            polygonPoints: TerritoryCellModel.fromJson(delta).polygonPoints,
+          );
+          _cellsMap[cell.h3Index] = cell;
+        }
+      }
+
+      _lastCircleCelebration = res;
+
+      // Reset loop start point to current position so the runner can start tracing the next circle!
+      _loopStartPoint = _sessionPath.last;
+      _sessionPath.clear();
+      _sessionPath.add(_loopStartPoint!);
+
+      notifyListeners();
+      return res;
+    } catch (e) {
+      debugPrint("Error closing circle loop: $e");
+      return null;
     }
   }
 
@@ -300,12 +366,14 @@ class GameProvider with ChangeNotifier {
       _isTracking = false;
       _activeRouteId = null;
       _sessionStartTime = null;
+      _loopStartPoint = null;
       notifyListeners();
       return res;
     } catch (_) {
       _isTracking = false;
       _activeRouteId = null;
       _sessionStartTime = null;
+      _loopStartPoint = null;
       notifyListeners();
       return null;
     }
@@ -361,4 +429,8 @@ class GameProvider with ChangeNotifier {
     locationService.dispose();
     super.dispose();
   }
+}
+
+extension DateTimeIso on DateTime {
+  String isoformat() => toUtc().toIso8601String();
 }

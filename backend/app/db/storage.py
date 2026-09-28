@@ -195,6 +195,49 @@ class InMemorySpatialStore:
 
             return res
 
+    async def close_route_loop(
+        self,
+        route_id: str,
+        loop_points: List[Dict[str, Any]],
+        activity_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        async with self._lock:
+            route = self.routes.get(route_id)
+            if not route:
+                raise KeyError(f"Route {route_id} not found")
+            if route["ended_at"] is not None:
+                raise ValueError("Route has already ended")
+
+            player_id = route["player_id"]
+            act = activity_type or route["activity_type"]
+
+            res = self.engine.process_closed_loop(
+                player_id=player_id,
+                activity_type=act,
+                loop_points=loop_points,
+            )
+
+            for chg in res["ownership_changes"]:
+                if chg["new_owner_id"] == player_id:
+                    route["captured_cells"].add(chg["h3_index"])
+
+            # Drain notification queue from engine
+            while self.engine.notification_queue:
+                notif = self.engine.notification_queue.pop(0)
+                notif_record = {
+                    "id": str(uuid.uuid4()),
+                    "player_id": notif["recipient_id"],
+                    "title": notif["title"],
+                    "message": notif["message"],
+                    "h3_index": notif.get("h3_index"),
+                    "displaced_by": notif.get("displaced_by"),
+                    "created_at": datetime.now(timezone.utc),
+                    "is_read": False,
+                }
+                self.notifications.append(notif_record)
+
+            return res
+
     async def end_route(self, route_id: str) -> Dict[str, Any]:
         async with self._lock:
             route = self.routes.get(route_id)

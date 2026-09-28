@@ -35,7 +35,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
     final game = Provider.of<GameProvider>(context, listen: false);
     final auth = Provider.of<AuthProvider>(context, listen: false);
 
-    // Try to acquire actual device GPS coordinates
+    // Acquire user's real local area via GPS or IP Geolocation
     final loc = await game.initUserLocation();
     final center = loc ?? game.currentLocation;
 
@@ -66,13 +66,11 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
   }
 
   void _onMapTapped(LatLng tapPoint, List<TerritoryCellModel> cells) {
-    // Find nearest cell within ~200 meters (H3 res 9 cell radius)
     TerritoryCellModel? closestCell;
-    double minDistance = 220.0; // meters
+    double minDistance = 220.0;
 
     for (final cell in cells) {
       if (cell.polygonPoints.isNotEmpty) {
-        // Calculate center of polygon
         double sumLat = 0;
         double sumLng = 0;
         for (final p in cell.polygonPoints) {
@@ -90,6 +88,127 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
 
     final game = Provider.of<GameProvider>(context, listen: false);
     game.inspectCell(closestCell);
+  }
+
+  void _openSearchDialog() {
+    final game = Provider.of<GameProvider>(context, listen: false);
+    final searchController = TextEditingController();
+    List<Map<String, dynamic>> results = [];
+    bool isSearching = false;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surfaceColor,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        "Jump to Local Area / City",
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white60),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: searchController,
+                    autofocus: true,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: "Search neighborhood, street, or city...",
+                      hintStyle: const TextStyle(color: Colors.white38),
+                      prefixIcon: const Icon(Icons.search, color: AppTheme.neonCyan),
+                      filled: true,
+                      fillColor: AppTheme.surfaceLight,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.arrow_forward_rounded, color: AppTheme.neonCyan),
+                        onPressed: () async {
+                          if (searchController.text.trim().isEmpty) return;
+                          setSheetState(() => isSearching = true);
+                          final found = await game.locationService.searchPlaces(searchController.text);
+                          setSheetState(() {
+                            results = found;
+                            isSearching = false;
+                          });
+                        },
+                      ),
+                    ),
+                    onSubmitted: (val) async {
+                      if (val.trim().isEmpty) return;
+                      setSheetState(() => isSearching = true);
+                      final found = await game.locationService.searchPlaces(val);
+                      setSheetState(() {
+                        results = found;
+                        isSearching = false;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  if (isSearching)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(16),
+                        child: CircularProgressIndicator(color: AppTheme.neonCyan),
+                      ),
+                    )
+                  else if (results.isNotEmpty)
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 220),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: results.length,
+                        separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                        itemBuilder: (context, i) {
+                          final item = results[i];
+                          return ListTile(
+                            leading: const Icon(Icons.location_on, color: AppTheme.neonCyan),
+                            title: Text(
+                              item['display_name'] ?? '',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.white, fontSize: 13),
+                            ),
+                            onTap: () {
+                              final lat = item['lat'] as double;
+                              final lng = item['lng'] as double;
+                              final targetLoc = LatLng(lat, lng);
+                              Navigator.pop(ctx);
+                              game.jumpToLocation(targetLoc);
+                              _mapController.move(targetLoc, 16.0);
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   void _showServerConfigDialog() {
@@ -213,6 +332,44 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
       });
     }
 
+    // Check if a circle was completed and conquered!
+    if (game.lastCircleCelebration != null) {
+      final cel = game.lastCircleCelebration!;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppTheme.surfaceColor,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: const BorderSide(color: AppTheme.neonCyan, width: 2),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.workspace_premium_rounded, color: AppTheme.goldAmber, size: 28),
+                SizedBox(width: 8),
+                Text("CIRCLE CONQUERED!", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            content: Text(
+              "🎉 Magnificent run! You completed the loop and conquered ${cel['enclosed_cells_count']} hexagons across ${cel['enclosed_area_m2']} m²!\n\nAll enclosed territory has been claimed with your banner.",
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            actions: [
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: AppTheme.neonCyan),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  game.clearCircleCelebration();
+                },
+                child: const Text("GLORIOUS!", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        );
+      });
+    }
+
     // Check if there is an active displaced alert
     if (game.lastDisplacedAlert != null) {
       final alert = game.lastDisplacedAlert!;
@@ -270,7 +427,6 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
               onTap: (tapPosition, point) => _onMapTapped(point, game.cells),
               onPositionChanged: (camera, hasGesture) {
                 if (hasGesture) {
-                  // User manually dragged/panned map; unlock auto-follow
                   if (_autoFollowRunner) {
                     setState(() => _autoFollowRunner = false);
                   }
@@ -293,7 +449,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
               // Hexagon Territory Polygons
               PolygonLayer(polygons: polygons),
 
-              // Active Route Polyline
+              // Active Route Boundary Polyline
               if (game.sessionPath.length > 1)
                 PolylineLayer(
                   polylines: [
@@ -302,12 +458,40 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                       color: AppTheme.neonCyan,
                       strokeWidth: 5.0,
                     ),
+                    // Dashed closure guide when runner is approaching start point
+                    if (game.isNearLoopStart && game.loopStartPoint != null)
+                      Polyline(
+                        points: [game.sessionPath.last, game.loopStartPoint!],
+                        color: AppTheme.goldAmber,
+                        strokeWidth: 3.5,
+                        strokeCap: StrokeCap.round,
+                      ),
                   ],
                 ),
 
-              // Current Location Marker with Heading Indicator
+              // Markers: Loop Start Flag + Current Location
               MarkerLayer(
                 markers: [
+                  // Circle Loop Start Flag
+                  if (game.isTracking && game.loopStartPoint != null)
+                    Marker(
+                      point: game.loopStartPoint!,
+                      width: 44,
+                      height: 44,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: AppTheme.goldAmber.withAlpha(220),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2.5),
+                          boxShadow: [
+                            BoxShadow(color: AppTheme.goldAmber.withAlpha(180), blurRadius: 12),
+                          ],
+                        ),
+                        child: const Icon(Icons.flag_rounded, color: Colors.black, size: 22),
+                      ),
+                    ),
+
+                  // Current Location Marker with Heading Indicator
                   Marker(
                     point: game.currentLocation,
                     width: 52,
@@ -340,7 +524,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
             ],
           ),
 
-          // 2. Top Tactical Status Header
+          // 2. Top Tactical Status Header & Area Controls
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -380,18 +564,36 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                   // Real-Time Live Status Badge
                   _LiveWsStatusBadge(state: game.wsConnectionState),
 
-                  // Actions: Server Settings, Auto-Follow, Refresh
+                  // Actions: Search City, Locate Me, Server Settings, Follow Toggle
                   Row(
                     children: [
+                      // Search Area / City Button
                       IconButton(
                         style: IconButton.styleFrom(
                           backgroundColor: AppTheme.surfaceColor.withAlpha(230),
                         ),
-                        icon: const Icon(Icons.wifi_tethering, color: AppTheme.neonCyan, size: 19),
-                        tooltip: "Server Config",
-                        onPressed: _showServerConfigDialog,
+                        icon: const Icon(Icons.search, color: AppTheme.neonCyan, size: 20),
+                        tooltip: "Search City / Area",
+                        onPressed: _openSearchDialog,
                       ),
                       const SizedBox(width: 6),
+                      // Locate Me Button
+                      IconButton(
+                        style: IconButton.styleFrom(
+                          backgroundColor: AppTheme.surfaceColor.withAlpha(230),
+                        ),
+                        icon: const Icon(Icons.my_location, color: AppTheme.tacticalGreen, size: 20),
+                        tooltip: "Locate My Area",
+                        onPressed: () async {
+                          final loc = await game.initUserLocation();
+                          if (loc != null && mounted) {
+                            setState(() => _autoFollowRunner = true);
+                            _mapController.move(loc, 16.5);
+                          }
+                        },
+                      ),
+                      const SizedBox(width: 6),
+                      // Auto-Follow Toggle
                       IconButton(
                         style: IconButton.styleFrom(
                           backgroundColor: _autoFollowRunner
@@ -414,18 +616,14 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                         },
                       ),
                       const SizedBox(width: 6),
+                      // Server Settings
                       IconButton(
                         style: IconButton.styleFrom(
                           backgroundColor: AppTheme.surfaceColor.withAlpha(230),
                         ),
-                        icon: game.isLoadingCells
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.neonCyan),
-                              )
-                            : const Icon(Icons.refresh, color: Colors.white, size: 19),
-                        onPressed: _initializeMapAndLocation,
+                        icon: const Icon(Icons.wifi_tethering, color: Colors.white70, size: 19),
+                        tooltip: "Server Config",
+                        onPressed: _showServerConfigDialog,
                       ),
                     ],
                   ),
@@ -434,12 +632,12 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
             ),
           ),
 
-          // 3. Hexagon Inspection Bottom Card (When Cell is Tapped)
+          // 3. Hexagon Inspection Bottom Card
           if (game.inspectedCell != null)
             Positioned(
               left: 16,
               right: 16,
-              bottom: game.isTracking ? 220 : 200,
+              bottom: game.isTracking ? 240 : 200,
               child: _HexagonInspectionCard(
                 cell: game.inspectedCell!,
                 currentUserId: player?.id,
@@ -447,7 +645,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
               ),
             ),
 
-          // 4. Bottom HUD / Tracking Session Panel
+          // 4. Bottom HUD / Circle Conquest Tracking Panel
           Positioned(
             left: 16,
             right: 16,
@@ -458,7 +656,9 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                 color: AppTheme.surfaceColor.withAlpha(245),
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(
-                  color: game.isTracking ? AppTheme.neonCyan : AppTheme.surfaceLight,
+                  color: game.isNearLoopStart
+                      ? AppTheme.goldAmber
+                      : (game.isTracking ? AppTheme.neonCyan : AppTheme.surfaceLight),
                   width: 2,
                 ),
                 boxShadow: [
@@ -473,7 +673,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (!game.isTracking) ...[
-                    // Tracking Mode Selector (Real GPS vs Demo Simulation)
+                    // Mode Selector (Live GPS vs Demo Simulator)
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -492,7 +692,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                         const SizedBox(width: 12),
                         _ModeChip(
                           icon: Icons.videogame_asset_outlined,
-                          label: "SIMULATOR",
+                          label: "SIMULATE CIRCLE",
                           selected: game.trackingMode == TrackingMode.simulation,
                           onTap: () {
                             game.setTrackingMode(TrackingMode.simulation);
@@ -535,8 +735,8 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                         icon: const Icon(Icons.play_arrow_rounded, size: 28),
                         label: Text(
                           game.trackingMode == TrackingMode.realGps
-                              ? "START LIVE GPS CONQUEST"
-                              : "START SIMULATION RUN",
+                              ? "START CIRCLE CONQUEST"
+                              : "START SIMULATION CIRCLE",
                           style: const TextStyle(letterSpacing: 0.8, fontWeight: FontWeight.w900),
                         ),
                         onPressed: () async {
@@ -550,7 +750,7 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                           if (!success) {
                             messenger.showSnackBar(
                               const SnackBar(
-                                content: Text("Failed to start tracking session. Check GPS permission."),
+                                content: Text("Failed to start session. Check GPS permission."),
                                 backgroundColor: AppTheme.neonPink,
                               ),
                             );
@@ -559,6 +759,46 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                       ),
                     ),
                   ] else ...[
+                    // Loop Status Guidance Banner
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        color: game.isNearLoopStart
+                            ? AppTheme.goldAmber.withAlpha(40)
+                            : AppTheme.surfaceLight,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: game.isNearLoopStart ? AppTheme.goldAmber : Colors.white12,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            game.isNearLoopStart
+                                ? Icons.check_circle_outline_rounded
+                                : Icons.sync_rounded,
+                            size: 16,
+                            color: game.isNearLoopStart ? AppTheme.goldAmber : AppTheme.neonCyan,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            game.isNearLoopStart
+                                ? "READY TO CLOSE CIRCLE! (${game.distanceToLoopStart.toStringAsFixed(0)}m to start flag)"
+                                : (game.canCloseLoop
+                                    ? "Circle eligible! Head back to start flag (${game.distanceToLoopStart.toStringAsFixed(0)}m)"
+                                    : "Drawing perimeter... (Run at least 80m to complete loop)"),
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: game.isNearLoopStart ? AppTheme.goldAmber : Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
                     // Active Real-Time Session Stats HUD
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -586,44 +826,80 @@ class _LiveMapScreenState extends State<LiveMapScreen> {
                           color: AppTheme.tacticalGreen,
                         ),
                         _StatWidget(
-                          label: "CAPTURED",
+                          label: "HEXAGONS",
                           value: "${game.sessionCapturedCount}",
                           color: AppTheme.neonPink,
                         ),
                       ],
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 14),
 
-                    // Stop Tracking Button
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.neonPink,
-                          foregroundColor: Colors.white,
+                    // Action Buttons: Complete Circle vs Finish Run
+                    Row(
+                      children: [
+                        // Complete Circle Button (Prominent when closing)
+                        Expanded(
+                          flex: 3,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: game.isNearLoopStart ? AppTheme.goldAmber : AppTheme.neonCyan,
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                            icon: const Icon(Icons.circle_outlined, size: 22),
+                            label: Text(
+                              game.isNearLoopStart ? "CLOSE CIRCLE NOW!" : "COMPLETE CIRCLE",
+                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+                            ),
+                            onPressed: () async {
+                              final messenger = ScaffoldMessenger.of(context);
+                              if (!game.canCloseLoop) {
+                                messenger.showSnackBar(
+                                  const SnackBar(
+                                    content: Text("Run a complete perimeter of at least 80m before closing circle!"),
+                                    backgroundColor: AppTheme.goldAmber,
+                                  ),
+                                );
+                                return;
+                              }
+                              await game.closeCurrentLoop();
+                            },
+                          ),
                         ),
-                        icon: const Icon(Icons.stop_rounded, size: 28),
-                        label: const Text(
-                          "FINISH & CLAIM SESSION",
-                          style: TextStyle(letterSpacing: 1.0, fontWeight: FontWeight.w900),
+                        const SizedBox(width: 10),
+                        // Finish Session Button
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppTheme.neonPink,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                            icon: const Icon(Icons.stop_rounded, size: 22),
+                            label: const Text(
+                              "FINISH",
+                              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+                            ),
+                            onPressed: () async {
+                              final messenger = ScaffoldMessenger.of(context);
+                              final res = await game.stopTrackingSession();
+                              if (!mounted) return;
+                              if (res != null) {
+                                auth.refreshProfile();
+                                messenger.showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      "Session Finished! Distance: ${res['distance_meters']}m | Hexagons Captured: ${res['cells_captured_count']}",
+                                    ),
+                                    backgroundColor: AppTheme.tacticalGreen,
+                                  ),
+                                );
+                              }
+                            },
+                          ),
                         ),
-                        onPressed: () async {
-                          final messenger = ScaffoldMessenger.of(context);
-                          final res = await game.stopTrackingSession();
-                          if (!mounted) return;
-                          if (res != null) {
-                            auth.refreshProfile();
-                            messenger.showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  "Conquest Complete! Distance: ${res['distance_meters']}m | Cells Conquered: ${res['cells_captured_count']}",
-                                ),
-                                backgroundColor: AppTheme.tacticalGreen,
-                              ),
-                            );
-                          }
-                        },
-                      ),
+                      ],
                     ),
                   ],
                 ],
@@ -909,7 +1185,7 @@ class _HexagonInspectionCard extends StatelessWidget {
               ),
               const Spacer(),
               Text(
-                isMine ? "Run through to reinforce" : "Exceed 115% score to conquer",
+                isMine ? "Defend with loops" : "Enclose in a circle to conquer",
                 style: const TextStyle(color: Colors.white54, fontSize: 10, fontStyle: FontStyle.italic),
               ),
             ],

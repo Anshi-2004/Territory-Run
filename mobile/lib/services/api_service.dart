@@ -150,6 +150,28 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>> closeLoop({
+    required String routeId,
+    required List<Map<String, dynamic>> loopPoints,
+    String activityType = "walk",
+  }) async {
+    final uri = Uri.parse("${ApiConstants.baseUrl}/routes/$routeId/close_loop");
+    final res = await http.post(
+      uri,
+      headers: _headers(),
+      body: jsonEncode({
+        "loop_points": loopPoints,
+        "activity_type": activityType,
+      }),
+    );
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body);
+    } else {
+      final err = jsonDecode(res.body);
+      throw Exception(err['detail'] ?? "Failed to close circle");
+    }
+  }
+
   Future<Map<String, dynamic>> endRoute(String routeId) async {
     final uri = Uri.parse("${ApiConstants.baseUrl}${ApiConstants.endRouteEndpoint(routeId)}");
     final res = await http.post(uri, headers: _headers());

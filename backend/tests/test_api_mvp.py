@@ -154,3 +154,41 @@ async def test_full_mvp_workflow():
         # Bob is #1 on leaderboard
         assert lb_data["entries"][0]["player_id"] == player2_id
         assert lb_data["entries"][0]["rank"] == 1
+
+
+@pytest.mark.asyncio
+async def test_close_loop_territory_enclosure():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        reg = await client.post("/auth/register", json={
+            "email": "looper@example.com",
+            "username": "Looper",
+            "password": "password123",
+            "color_hex": "#00FFCC",
+        })
+        token = reg.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        start_resp = await client.post("/routes/start", json={"activity_type": "run"}, headers=headers)
+        route_id = start_resp.json()["route_id"]
+
+        now = datetime.now(timezone.utc)
+        loop_points = [
+            {"lat": 37.770, "lng": -122.420, "timestamp": now.isoformat()},
+            {"lat": 37.775, "lng": -122.420, "timestamp": now.isoformat()},
+            {"lat": 37.775, "lng": -122.415, "timestamp": now.isoformat()},
+            {"lat": 37.770, "lng": -122.415, "timestamp": now.isoformat()},
+            {"lat": 37.770, "lng": -122.420, "timestamp": now.isoformat()},
+        ]
+
+        resp = await client.post(
+            f"/routes/{route_id}/close_loop",
+            json={"loop_points": loop_points, "activity_type": "run"},
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enclosed_cells_count"] >= 1
+        assert data["enclosed_area_m2"] > 0
+        assert len(data["captured_cells"]) >= 1

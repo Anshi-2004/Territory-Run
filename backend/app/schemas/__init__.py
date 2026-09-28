@@ -89,6 +89,18 @@ class RouteEndResponse(BaseModel):
     cells_captured_count: int
 
 
+class CloseLoopRequest(BaseModel):
+    loop_points: List[PingPoint] = Field(..., min_length=4)
+    activity_type: Optional[str] = Field(default="walk", pattern=r"^(walk|jog|run)$")
+
+
+class CloseLoopResponse(BaseModel):
+    enclosed_cells_count: int
+    enclosed_area_m2: float
+    captured_cells: List[OwnershipDelta]
+    message: str
+
+
 # Territory Schemas
 class TerritoryCellResponse(BaseModel):
     h3_index: str
