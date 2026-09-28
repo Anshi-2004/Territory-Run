@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -53,6 +54,7 @@ async def health_check():
         "version": settings.VERSION,
         "h3_resolution": settings.H3_RESOLUTION,
         "half_life_days": settings.RECENCY_HALF_LIFE_DAYS,
+        "server_time": datetime.now(timezone.utc).isoformat(),
     }
 
 

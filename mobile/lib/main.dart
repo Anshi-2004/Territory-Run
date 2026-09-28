@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'config/api_constants.dart';
 import 'services/api_service.dart';
 import 'providers/auth_provider.dart';
 import 'providers/game_provider.dart';
@@ -9,6 +10,7 @@ import 'screens/main_navigation_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await ApiConstants.loadCustomBaseUrl();
 
   final apiService = ApiService();
   await apiService.init();

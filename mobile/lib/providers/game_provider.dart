@@ -13,16 +13,25 @@ class GameProvider with ChangeNotifier {
   final WebSocketService wsService = WebSocketService();
   final LocationService locationService = LocationService();
 
+  // Tracking Mode (Real GPS vs Demo Simulation)
+  TrackingMode _trackingMode = TrackingMode.realGps;
+  TrackingMode get trackingMode => _trackingMode;
+
   // Territory Map State
   final Map<String, TerritoryCellModel> _cellsMap = {};
   List<TerritoryCellModel> get cells => _cellsMap.values.toList();
   bool _isLoadingCells = false;
   bool get isLoadingCells => _isLoadingCells;
 
+  // Currently inspected cell on map tap
+  TerritoryCellModel? _inspectedCell;
+  TerritoryCellModel? get inspectedCell => _inspectedCell;
+
   // Active Tracking Session State
   bool _isTracking = false;
   String? _activeRouteId;
   String _activityType = "walk"; // walk | jog | run
+  DateTime? _sessionStartTime;
   int _elapsedSeconds = 0;
   double _sessionDistanceM = 0.0;
   int _sessionCapturedCount = 0;
@@ -33,11 +42,33 @@ class GameProvider with ChangeNotifier {
   bool get isTracking => _isTracking;
   String? get activeRouteId => _activeRouteId;
   String get activityType => _activityType;
-  int get elapsedSeconds => _elapsedSeconds;
+
+  int get elapsedSeconds {
+    if (!_isTracking || _sessionStartTime == null) return _elapsedSeconds;
+    return DateTime.now().difference(_sessionStartTime!).inSeconds;
+  }
+
   double get sessionDistanceM => _sessionDistanceM;
   int get sessionCapturedCount => _sessionCapturedCount;
   List<LatLng> get sessionPath => List.unmodifiable(_sessionPath);
   LatLng get currentLocation => locationService.currentLocation;
+  double get currentSpeedKmh => locationService.currentSpeedKmh;
+  double get currentHeading => locationService.currentHeading;
+
+  String get currentPaceString {
+    final secs = elapsedSeconds;
+    if (_sessionDistanceM <= 10 || secs < 4) return "--:-- /km";
+    final km = _sessionDistanceM / 1000.0;
+    final minsPerKm = (secs / 60.0) / km;
+    if (minsPerKm > 40 || minsPerKm.isNaN || minsPerKm.isInfinite) {
+      return "--:-- /km";
+    }
+    final m = minsPerKm.floor();
+    final s = ((minsPerKm - m) * 60).round();
+    return "${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')} /km";
+  }
+
+  WsConnectionState get wsConnectionState => wsService.connectionState;
 
   // Leaderboard State
   List<LeaderboardItem> _leaderboard = [];
@@ -70,15 +101,50 @@ class GameProvider with ChangeNotifier {
 
     wsService.onNotificationReceived = (alertData) {
       _lastDisplacedAlert = alertData;
-      // Refresh notifications list
       loadNotifications();
       notifyListeners();
     };
+
+    wsService.onConnectionStateChanged = (_) {
+      notifyListeners();
+    };
+  }
+
+  void setTrackingMode(TrackingMode mode) {
+    _trackingMode = mode;
+    locationService.setMode(mode);
+    notifyListeners();
+  }
+
+  void inspectCell(TerritoryCellModel? cell) {
+    _inspectedCell = cell;
+    notifyListeners();
   }
 
   void clearDisplacedAlert() {
     _lastDisplacedAlert = null;
     notifyListeners();
+  }
+
+  /// Acquires actual GPS lock on device and centers viewport accordingly
+  Future<LatLng?> initUserLocation() async {
+    final loc = await locationService.initDeviceLocation();
+    if (loc != null) {
+      updateViewportBbox(
+        loc.longitude - 0.04,
+        loc.latitude - 0.04,
+        loc.longitude + 0.04,
+        loc.latitude + 0.04,
+      );
+      fetchViewportCells(
+        minLng: loc.longitude - 0.04,
+        minLat: loc.latitude - 0.04,
+        maxLng: loc.longitude + 0.04,
+        maxLat: loc.latitude + 0.04,
+      );
+      notifyListeners();
+    }
+    return loc;
   }
 
   void connectRealtime(String playerId, LatLng center) {
@@ -127,27 +193,32 @@ class GameProvider with ChangeNotifier {
 
   Future<bool> startTrackingSession({
     String activityType = "walk",
-    bool simulate = true,
+    TrackingMode? mode,
+    bool simulate = false,
   }) async {
+    final effectiveMode = mode ?? (simulate ? TrackingMode.simulation : _trackingMode);
+    _trackingMode = effectiveMode;
+
     try {
       final routeId = await apiService.startRoute(activityType: activityType);
       _activeRouteId = routeId;
       _activityType = activityType;
       _isTracking = true;
+      _sessionStartTime = DateTime.now();
       _elapsedSeconds = 0;
       _sessionDistanceM = 0.0;
       _sessionCapturedCount = 0;
       _sessionPath.clear();
       _sessionPath.add(locationService.currentLocation);
 
-      // Start elapsed timer
+      // Start periodic ticker for smooth UI updates
       _sessionTimer?.cancel();
       _sessionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        _elapsedSeconds++;
+        _elapsedSeconds = DateTime.now().difference(_sessionStartTime!).inSeconds;
         notifyListeners();
       });
 
-      // Buffer pings to send to server in batches every 2 seconds
+      // Buffer pings to send to server in batches
       final List<Map<String, dynamic>> pingBuffer = [];
 
       _locationSub?.cancel();
@@ -163,7 +234,7 @@ class GameProvider with ChangeNotifier {
         pingBuffer.add(ping.toJson());
         notifyListeners();
 
-        // Flush batch if buffer has 2+ pings
+        // Flush batch when buffer has 2+ pings
         if (pingBuffer.length >= 2 && _activeRouteId != null) {
           final toSend = List<Map<String, dynamic>>.from(pingBuffer);
           pingBuffer.clear();
@@ -189,7 +260,19 @@ class GameProvider with ChangeNotifier {
         }
       });
 
-      if (simulate) {
+      // Start hardware GPS or simulation based on mode
+      if (effectiveMode == TrackingMode.realGps) {
+        final started = await locationService.startRealGpsTracking();
+        if (!started) {
+          // Fallback to simulation if GPS permission was denied
+          final speedKmh = activityType == "run" ? 11.5 : (activityType == "jog" ? 8.5 : 5.0);
+          locationService.startSimulation(
+            speedKmh: speedKmh,
+            headingDegrees: 45.0,
+            startFrom: locationService.currentLocation,
+          );
+        }
+      } else {
         final speedKmh = activityType == "run" ? 11.5 : (activityType == "jog" ? 8.5 : 5.0);
         locationService.startSimulation(
           speedKmh: speedKmh,
@@ -210,17 +293,19 @@ class GameProvider with ChangeNotifier {
 
     _sessionTimer?.cancel();
     _locationSub?.cancel();
-    locationService.stopSimulation();
+    locationService.stopTracking();
 
     try {
       final res = await apiService.endRoute(_activeRouteId!);
       _isTracking = false;
       _activeRouteId = null;
+      _sessionStartTime = null;
       notifyListeners();
       return res;
     } catch (_) {
       _isTracking = false;
       _activeRouteId = null;
+      _sessionStartTime = null;
       notifyListeners();
       return null;
     }

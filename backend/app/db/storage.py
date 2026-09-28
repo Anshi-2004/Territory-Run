@@ -327,6 +327,14 @@ class WebSocketManager:
         async with self._lock:
             self.map_connections[websocket] = bbox
 
+    async def update_map_bbox(
+        self,
+        websocket: WebSocket,
+        bbox: Tuple[float, float, float, float],
+    ):
+        async with self._lock:
+            self.map_connections[websocket] = bbox
+
     async def disconnect_map(self, websocket: WebSocket):
         async with self._lock:
             if websocket in self.map_connections:

@@ -33,7 +33,7 @@ async def websocket_map_viewport(websocket: WebSocket, bbox: str):
                 try:
                     p = [float(x.strip()) for x in new_bbox_str.split(",")]
                     if len(p) == 4:
-                        ws_manager.map_connections[websocket] = (p[0], p[1], p[2], p[3])
+                        await ws_manager.update_map_bbox(websocket, (p[0], p[1], p[2], p[3]))
                 except Exception:
                     pass
             elif data == "ping":
